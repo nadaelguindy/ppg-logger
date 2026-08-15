@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live PPG Glucose Logger</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background: #f5f5f4; color: #222; }
+  h2 { margin-top: 0; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .status { font-size: 18px; font-weight: bold; }
+  .ok { color: #16a34a; }
+  .bad { color: #dc2626; }
+  label { display: block; margin-top: 12px; font-size: 14px; color: #555; }
+  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; margin-top: 4px; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
+  button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 8px; margin-top: 12px; color: #fff; font-weight: bold; }
+  .connect { background: #444; }
+  .start { background: #16a34a; }
+  button:disabled { opacity: 0.5; }
+  .input-row { display: flex; gap: 10px; }
+  .input-row > div { flex: 1; }
+  
+  /* Canvas Styling */
+  #plotCanvas { width: 100%; height: 200px; background: #222; border-radius: 8px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <h2>Live PPG Logger</h2>
+
+  <div class="card">
+    <button class="connect" id="connectBtn" onclick="connectSerial()">Connect via USB OTG</button>
+    <div id="connState" style="margin-top:8px; font-size:14px; color:#555;">Not connected</div>
+  </div>
+
+  <div class="card">
+    <canvas id="plotCanvas" width="400" height="200"></canvas>
+    <div style="margin-top:10px;">Status: <span id="recstate" class="status">stopped</span></div>
+    <div id="saveresult" style="margin-top:8px; font-size:14px; font-weight:bold;"></div>
+  </div>
+
+  <div class="card">
+    <div class="input-row">
+      <div><label>Age</label><input id="age" type="number" placeholder="45"></div>
+      <div><label>Sex</label>
+        <select id="sex">
+          <option value="">...</option><option value="M">Male</option><option value="F">Female</option>
+        </select>
+      </div>
+    </div>
+    <div class="input-row">
+      <div><label>Height (cm)</label><input id="height" type="number" placeholder="175"></div>
+      <div><label>Weight (kg)</label><input id="weight" type="number" placeholder="70"></div>
+    </div>
+    <label>Skin Color</label>
+    <select id="skincolor">
+      <option value="">...</option>
+      <option value="1">Light</option>
+      <option value="2">Medium</option>
+      <option value="3">Dark</option>
+    </select>
+    <button class="start" id="startBtn" onclick="startRec()" disabled>Start 16s Recording</button>
+  </div>
+
+<script>
+let port, reader, writer;
+let lineBuffer = "";
+
+// Plotting Variables
+const canvas = document.getElementById('plotCanvas');
+const ctx = canvas.getContext('2d');
+let ppgData = [];
+const MAX_PLOT_POINTS = 400; // Shows the last 1 second of data on screen
+
+async function connectSerial() {
+  if (!('serial' in navigator)) { alert('Web Serial is not supported. Use Chrome on Android.'); return; }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    document.getElementById('connState').textContent = 'Connected successfully';
+    document.getElementById('startBtn').disabled = false;
+
+    const textDecoder = new TextDecoderStream();
+    port.readable.pipeTo(textDecoder.writable);
+    reader = textDecoder.readable.getReader();
+
+    const textEncoder = new TextEncoderStream();
+    textEncoder.readable.pipeTo(port.writable);
+    writer = textEncoder.writable.getWriter();
+
+    readLoop();
+  } catch (e) {
+    document.getElementById('connState').textContent = 'Connection failed: ' + e.message;
+  }
+}
+
+async function readLoop() {
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    lineBuffer += value;
+    let idx;
+    while ((idx = lineBuffer.indexOf('\n')) >= 0) {
+      const line = lineBuffer.slice(0, idx).trim();
+      lineBuffer = lineBuffer.slice(idx + 1);
+      if (line) handleLine(line);
+    }
+  }
+}
+
+function handleLine(line) {
+  const parts = line.split(',');
+  
+  if (parts[0] === 'DATA') {
+    // Read the IR value and add to plot array
+    const val = parseInt(parts[1]);
+    ppgData.push(val);
+    if (ppgData.length > MAX_PLOT_POINTS) ppgData.shift();
+    drawPlot();
+  } 
+  else if (parts[0] === 'STATUS') {
+    const recording = parts[2] === '1';
+    document.getElementById('recstate').textContent = recording ? 'recording live data...' : parts[3] || 'stopped';
+    if (recording) document.getElementById('recstate').style.color = '#16a34a';
+  } 
+  else if (parts[0] === 'ACK') {
+    document.getElementById('recstate').textContent = 'finished';
+    document.getElementById('recstate').style.color = '#222';
+    document.getElementById('saveresult').textContent = parts[1];
+    document.getElementById('saveresult').style.color = "#2563eb";
+    document.getElementById('startBtn').disabled = false; // Re-enable button
+  }
+}
+
+function drawPlot() {
+  canvas.width = canvas.clientWidth; // Auto-adjust resolution
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (ppgData.length < 2) return;
+
+  // Find min and max for auto-scaling
+  let min = ppgData[0], max = ppgData[0];
+  for (let i = 1; i < ppgData.length; i++) {
+    if (ppgData[i] < min) min = ppgData[i];
+    if (ppgData[i] > max) max = ppgData[i];
+  }
+  
+  // Add a small margin to max and min
+  let range = max - min;
+  if (range === 0) range = 1;
+  min -= range * 0.1;
+  max += range * 0.1;
+
+  ctx.beginPath();
+  ctx.strokeStyle = '#10b981'; // Green wave
+  ctx.lineWidth = 2;
+
+  for (let i = 0; i < ppgData.length; i++) {
+    const x = (i / MAX_PLOT_POINTS) * canvas.width;
+    const y = canvas.height - ((ppgData[i] - min) / (max - min)) * canvas.height;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+async function sendCommand(cmd) {
+  if (!writer) return;
+  await writer.write(cmd + '\n');
+}
+
+function startRec() {
+  const age = document.getElementById('age').value;
+  const sex = document.getElementById('sex').value;
+  const height = document.getElementById('height').value;
+  const weight = document.getElementById('weight').value;
+  const skincolor = document.getElementById('skincolor').value;
+
+  if (!age || !sex || !height || !weight || !skincolor) { 
+    alert('Please fill all demographic data.'); return; 
+  }
+
+  const heightInMeters = height / 100;
+  const bmi = (weight / (heightInMeters * heightInMeters)).toFixed(1);
+
+  let currentDatasetId = localStorage.getItem('dataset_counter') || 1;
+  currentDatasetId = parseInt(currentDatasetId);
+
+  // Clear previous plot
+  ppgData = [];
+  drawPlot();
+
+  // Send the command
+  const command = `START,${currentDatasetId},${age},${sex},${bmi},${skincolor}`;
+  sendCommand(command);
+
+  document.getElementById('saveresult').textContent = "Processing Patient ID: " + currentDatasetId;
+  document.getElementById('startBtn').disabled = true; // Disable until finished
+  
+  localStorage.setItem('dataset_counter', currentDatasetId + 1);
+}
+</script>
+</body>
+</html>
