@@ -21,7 +21,38 @@
   .input-row > div { flex: 1; }
   
   /* Canvas Styling */
-  #plotCanvas { width: 100%; height: 200px; background: #222; border-radius: 8px; margin-top: 10px; }
+  #plotCanvas { width: 100%; height: 200px; background: #222; border-radius: 8px; margin-top: 10px; display: block; }
+
+  /* Skin Color Swatches */
+  .skin-swatches { display: flex; gap: 8px; margin-top: 6px; }
+  .swatch-btn {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 4px;
+    border: 2px solid #ccc;
+    border-radius: 8px;
+    cursor: pointer;
+    background: #fff;
+    font-size: 14px;
+    margin-top: 0;
+    transition: all 0.2s ease;
+  }
+  .swatch-btn input { display: none; }
+  .swatch-btn:has(input:checked), .swatch-btn.active {
+    border-color: #16a34a;
+    background: #f0fdf4;
+    font-weight: bold;
+  }
+  .swatch-circle {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.2);
+    display: inline-block;
+  }
 </style>
 </head>
 <body>
@@ -51,13 +82,24 @@
       <div><label>Height (cm)</label><input id="height" type="number" placeholder="175"></div>
       <div><label>Weight (kg)</label><input id="weight" type="number" placeholder="70"></div>
     </div>
+    
     <label>Skin Color</label>
-    <select id="skincolor">
-      <option value="">...</option>
-      <option value="1">Light</option>
-      <option value="2">Medium</option>
-      <option value="3">Dark</option>
-    </select>
+    <div class="skin-swatches">
+      <label class="swatch-btn">
+        <input type="radio" name="skin" value="1" onchange="selectSkin('1')">
+        <span class="swatch-circle" style="background:#f5d0b0;"></span> Light
+      </label>
+      <label class="swatch-btn">
+        <input type="radio" name="skin" value="2" onchange="selectSkin('2')">
+        <span class="swatch-circle" style="background:#b07842;"></span> Medium
+      </label>
+      <label class="swatch-btn">
+        <input type="radio" name="skin" value="3" onchange="selectSkin('3')">
+        <span class="swatch-circle" style="background:#4a2b13;"></span> Dark
+      </label>
+    </div>
+    <input type="hidden" id="skincolor" value="">
+
     <button class="start" id="startBtn" onclick="startRec()" disabled>Start 16s Recording</button>
   </div>
 
@@ -69,7 +111,27 @@ let lineBuffer = "";
 const canvas = document.getElementById('plotCanvas');
 const ctx = canvas.getContext('2d');
 let ppgData = [];
-const MAX_PLOT_POINTS = 400; // Shows the last 1 second of data on screen
+const MAX_PLOT_POINTS = 400; // Shows the last window of data points on screen
+let isPlotting = false;
+
+function selectSkin(val) {
+  document.getElementById('skincolor').value = val;
+  document.querySelectorAll('.swatch-btn').forEach(btn => {
+    const radio = btn.querySelector('input');
+    if (radio.checked) btn.classList.add('active');
+    else btn.classList.remove('active');
+  });
+}
+
+function startPlotLoop() {
+  if (isPlotting) return;
+  isPlotting = true;
+  function render() {
+    drawPlot();
+    requestAnimationFrame(render);
+  }
+  requestAnimationFrame(render);
+}
 
 async function connectSerial() {
   if (!('serial' in navigator)) { alert('Web Serial is not supported. Use Chrome on Android.'); return; }
@@ -87,6 +149,7 @@ async function connectSerial() {
     textEncoder.readable.pipeTo(port.writable);
     writer = textEncoder.writable.getWriter();
 
+    startPlotLoop(); // Continuous smooth canvas rendering loop
     readLoop();
   } catch (e) {
     document.getElementById('connState').textContent = 'Connection failed: ' + e.message;
@@ -111,11 +174,11 @@ function handleLine(line) {
   const parts = line.split(',');
   
   if (parts[0] === 'DATA') {
-    // Read the IR value and add to plot array
     const val = parseInt(parts[1]);
-    ppgData.push(val);
-    if (ppgData.length > MAX_PLOT_POINTS) ppgData.shift();
-    drawPlot();
+    if (!isNaN(val)) {
+      ppgData.push(val);
+      if (ppgData.length > MAX_PLOT_POINTS) ppgData.shift();
+    }
   } 
   else if (parts[0] === 'STATUS') {
     const recording = parts[2] === '1';
@@ -127,30 +190,34 @@ function handleLine(line) {
     document.getElementById('recstate').style.color = '#222';
     document.getElementById('saveresult').textContent = parts[1];
     document.getElementById('saveresult').style.color = "#2563eb";
-    document.getElementById('startBtn').disabled = false; // Re-enable button
+    document.getElementById('startBtn').disabled = false;
   }
 }
 
 function drawPlot() {
-  canvas.width = canvas.clientWidth; // Auto-adjust resolution
+  // Check resolution match without clearing canvas on every data point
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+  }
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (ppgData.length < 2) return;
 
-  // Find min and max for auto-scaling
+  // Find min and max for dynamic scaling
   let min = ppgData[0], max = ppgData[0];
   for (let i = 1; i < ppgData.length; i++) {
     if (ppgData[i] < min) min = ppgData[i];
     if (ppgData[i] > max) max = ppgData[i];
   }
   
-  // Add a small margin to max and min
   let range = max - min;
   if (range === 0) range = 1;
   min -= range * 0.1;
   max += range * 0.1;
 
   ctx.beginPath();
-  ctx.strokeStyle = '#10b981'; // Green wave
+  ctx.strokeStyle = '#10b981'; // PPG green trace
   ctx.lineWidth = 2;
 
   for (let i = 0; i < ppgData.length; i++) {
@@ -184,16 +251,15 @@ function startRec() {
   let currentDatasetId = localStorage.getItem('dataset_counter') || 1;
   currentDatasetId = parseInt(currentDatasetId);
 
-  // Clear previous plot
+  // Clear previous plot points
   ppgData = [];
-  drawPlot();
 
   // Send the command
   const command = `START,${currentDatasetId},${age},${sex},${bmi},${skincolor}`;
   sendCommand(command);
 
   document.getElementById('saveresult').textContent = "Processing Patient ID: " + currentDatasetId;
-  document.getElementById('startBtn').disabled = true; // Disable until finished
+  document.getElementById('startBtn').disabled = true;
   
   localStorage.setItem('dataset_counter', currentDatasetId + 1);
 }
