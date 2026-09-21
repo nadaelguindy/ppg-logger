@@ -9,21 +9,19 @@
   h2 { margin-top: 0; }
   .card { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
   .status { font-size: 18px; font-weight: bold; }
-  .ok { color: #16a34a; }
-  .bad { color: #dc2626; }
   label { display: block; margin-top: 12px; font-size: 14px; color: #555; }
   input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; margin-top: 4px; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
-  button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 8px; margin-top: 12px; color: #fff; font-weight: bold; }
-  .connect { background: #444; }
+  button { width: 100%; padding: 14px; font-size: 16px; border: none; border-radius: 8px; margin-top: 12px; color: #fff; font-weight: bold; cursor: pointer; }
+  .connect { background: #2563eb; }
   .start { background: #16a34a; }
-  button:disabled { opacity: 0.5; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   .input-row { display: flex; gap: 10px; }
   .input-row > div { flex: 1; }
   
   /* Canvas Styling */
   #plotCanvas { width: 100%; height: 200px; background: #222; border-radius: 8px; margin-top: 10px; display: block; }
 
-  /* Skin Color Swatches */
+  /* Skin Color Swatches with Visual Color Circles */
   .skin-swatches { display: flex; gap: 8px; margin-top: 6px; }
   .swatch-btn {
     flex: 1;
@@ -59,7 +57,7 @@
   <h2>Live PPG Logger</h2>
 
   <div class="card">
-    <button class="connect" id="connectBtn" onclick="connectSerial()">Connect via USB OTG</button>
+    <button class="connect" id="connectBtn" onclick="connectBluetooth()">Connect via Bluetooth</button>
     <div id="connState" style="margin-top:8px; font-size:14px; color:#555;">Not connected</div>
   </div>
 
@@ -104,14 +102,17 @@
   </div>
 
 <script>
-let port, reader, writer;
+const SERVICE_UUID = "42a2a000-0000-1000-8000-00805f9b34fb";
+const CHARACTERISTIC_UUID = "42a2a001-0000-1000-8000-00805f9b34fb";
+
+let bleDevice, bleCharacteristic;
 let lineBuffer = "";
 
 // Plotting Variables
 const canvas = document.getElementById('plotCanvas');
 const ctx = canvas.getContext('2d');
 let ppgData = [];
-const MAX_PLOT_POINTS = 400; // Shows the last window of data points on screen
+const MAX_PLOT_POINTS = 400; // Displays last 1 second of live signal
 let isPlotting = false;
 
 function selectSkin(val) {
@@ -133,40 +134,51 @@ function startPlotLoop() {
   requestAnimationFrame(render);
 }
 
-async function connectSerial() {
-  if (!('serial' in navigator)) { alert('Web Serial is not supported. Use Chrome on Android.'); return; }
+async function connectBluetooth() {
+  if (!('bluetooth' in navigator)) {
+    alert('Web Bluetooth is not supported. Use Google Chrome on Android or Desktop.');
+    return;
+  }
+
   try {
-    port = await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
-    document.getElementById('connState').textContent = 'Connected successfully';
+    document.getElementById('connState').textContent = 'Searching for PPG-Logger...';
+    
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: 'PPG-Logger' }],
+      optionalServices: [SERVICE_UUID]
+    });
+
+    bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+    const server = await bleDevice.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+    await bleCharacteristic.startNotifications();
+    bleCharacteristic.addEventListener('characteristicvaluechanged', handleBLEData);
+
+    document.getElementById('connState').textContent = 'Connected via Bluetooth';
     document.getElementById('startBtn').disabled = false;
-
-    const textDecoder = new TextDecoderStream();
-    port.readable.pipeTo(textDecoder.writable);
-    reader = textDecoder.readable.getReader();
-
-    const textEncoder = new TextEncoderStream();
-    textEncoder.readable.pipeTo(port.writable);
-    writer = textEncoder.writable.getWriter();
-
-    startPlotLoop(); // Continuous smooth canvas rendering loop
-    readLoop();
+    startPlotLoop();
   } catch (e) {
     document.getElementById('connState').textContent = 'Connection failed: ' + e.message;
   }
 }
 
-async function readLoop() {
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    lineBuffer += value;
-    let idx;
-    while ((idx = lineBuffer.indexOf('\n')) >= 0) {
-      const line = lineBuffer.slice(0, idx).trim();
-      lineBuffer = lineBuffer.slice(idx + 1);
-      if (line) handleLine(line);
-    }
+function onDisconnected() {
+  document.getElementById('connState').textContent = 'Disconnected';
+  document.getElementById('startBtn').disabled = true;
+}
+
+function handleBLEData(event) {
+  const decoder = new TextDecoder('utf-8');
+  lineBuffer += decoder.decode(event.target.value);
+  
+  let idx;
+  while ((idx = lineBuffer.indexOf('\n')) >= 0) {
+    const line = lineBuffer.slice(0, idx).trim();
+    lineBuffer = lineBuffer.slice(idx + 1);
+    if (line) handleLine(line);
   }
 }
 
@@ -195,7 +207,6 @@ function handleLine(line) {
 }
 
 function drawPlot() {
-  // Check resolution match without clearing canvas on every data point
   if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
@@ -204,7 +215,6 @@ function drawPlot() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (ppgData.length < 2) return;
 
-  // Find min and max for dynamic scaling
   let min = ppgData[0], max = ppgData[0];
   for (let i = 1; i < ppgData.length; i++) {
     if (ppgData[i] < min) min = ppgData[i];
@@ -217,7 +227,7 @@ function drawPlot() {
   max += range * 0.1;
 
   ctx.beginPath();
-  ctx.strokeStyle = '#10b981'; // PPG green trace
+  ctx.strokeStyle = '#10b981'; // Green pulse trace
   ctx.lineWidth = 2;
 
   for (let i = 0; i < ppgData.length; i++) {
@@ -230,8 +240,9 @@ function drawPlot() {
 }
 
 async function sendCommand(cmd) {
-  if (!writer) return;
-  await writer.write(cmd + '\n');
+  if (!bleCharacteristic) return;
+  const encoder = new TextEncoder();
+  await bleCharacteristic.writeValue(encoder.encode(cmd + '\n'));
 }
 
 function startRec() {
@@ -251,10 +262,8 @@ function startRec() {
   let currentDatasetId = localStorage.getItem('dataset_counter') || 1;
   currentDatasetId = parseInt(currentDatasetId);
 
-  // Clear previous plot points
-  ppgData = [];
+  ppgData = []; // Clear canvas for new recording
 
-  // Send the command
   const command = `START,${currentDatasetId},${age},${sex},${bmi},${skincolor}`;
   sendCommand(command);
 
