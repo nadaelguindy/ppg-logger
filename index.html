@@ -29,6 +29,22 @@
   .swatch.selected { border-color: #16a34a; background: #eafbf0; }
   .swatch-circle { width: 32px; height: 32px; border-radius: 50%; border: 1px solid rgba(0,0,0,0.15); }
   .swatch-label { font-size: 12px; color: #444; }
+
+  .rec-item { border: 1px solid #e5e5e4; border-radius: 10px; padding: 12px; margin-top: 10px; }
+  .rec-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .rec-title { font-weight: bold; font-size: 15px; }
+  .rec-meta { font-size: 12px; color: #777; margin-top: 2px; }
+  .rec-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .rec-actions button { width: auto; flex: 1; min-width: 80px; padding: 8px; font-size: 13px; margin-top: 0; }
+  .btn-rename { background: #444; }
+  .btn-delete { background: #dc2626; }
+  .btn-download { background: #2563eb; }
+  .btn-icon { background: none; border: none; cursor: pointer; font-size: 18px; padding: 4px; width: auto; color: #999; }
+  .glucose-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+  .glucose-row input { margin-top: 0; }
+  .glucose-row button { width: auto; margin-top: 0; padding: 10px 14px; background: #16a34a; }
+  .glucose-saved { font-size: 13px; color: #16a34a; font-weight: bold; }
+  .empty-state { color: #999; font-size: 14px; text-align: center; padding: 12px 0; }
 </style>
 </head>
 <body>
@@ -76,6 +92,11 @@
     <button class="start" id="startBtn" onclick="startRec()" disabled>Start 30s Recording</button>
   </div>
 
+  <div class="card">
+    <h3 style="margin-top:0;">My Recordings</h3>
+    <div id="recordingsList"></div>
+  </div>
+
 <script>
 // Must match the firmware's #define SERVICE_UUID / CHARACTERISTIC_UUID exactly
 const SERVICE_UUID = "42a2a000-0000-1000-8000-00805f9b34fb";
@@ -88,6 +109,145 @@ const canvas = document.getElementById('plotCanvas');
 const ctx = canvas.getContext('2d');
 let ppgData = [];
 const MAX_PLOT_POINTS = 400;
+
+// ---------- Recordings storage (saved locally in this browser) ----------
+// Every finished recording (full sample array + the demographic info you
+// entered + its glucose reading) is stored under this key, so it survives
+// page reloads and works with no server/laptop involved. Export to CSV
+// whenever you want the data out for your ML dataset.
+const RECORDINGS_KEY = 'ppg_recordings';
+let fullSessionData = [];      // uncapped sample buffer for the recording in progress
+let pendingSession = null;     // metadata captured at Start, saved once ACK arrives
+
+function loadRecordings() {
+  try {
+    return JSON.parse(localStorage.getItem(RECORDINGS_KEY)) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveRecordings(list) {
+  localStorage.setItem(RECORDINGS_KEY, JSON.stringify(list));
+}
+
+function renderRecordings() {
+  const list = loadRecordings();
+  const container = document.getElementById('recordingsList');
+
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty-state">No recordings saved yet. Finish a 30s recording to see it here.</div>';
+    return;
+  }
+
+  // Newest first
+  const sorted = [...list].sort((a, b) => b.timestamp - a.timestamp);
+
+  container.innerHTML = sorted.map(rec => {
+    const date = new Date(rec.timestamp).toLocaleString();
+    const glucoseBlock = rec.glucose
+      ? `<span class="glucose-saved">Glucose: ${rec.glucose} mg/dL</span> <button class="btn-icon" onclick="editGlucose('${rec.id}')" title="Edit">&#9998;</button>`
+      : `<div class="glucose-row">
+           <input type="number" placeholder="Glucometer reading (mg/dL)" id="glucose-input-${rec.id}">
+           <button onclick="setGlucose('${rec.id}')">Save</button>
+         </div>`;
+
+    return `
+      <div class="rec-item">
+        <div class="rec-top">
+          <div>
+            <div class="rec-title">${escapeHtml(rec.label)}</div>
+            <div class="rec-meta">${date} &middot; ${rec.samples.length} samples &middot; Age ${rec.age}, ${rec.sex}, BMI ${rec.bmi}, Skin ${skinLabel(rec.skincolor)}</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;">${glucoseBlock}</div>
+        <div class="rec-actions">
+          <button class="btn-rename" onclick="renameRecording('${rec.id}')">Rename</button>
+          <button class="btn-download" onclick="downloadRecordingCSV('${rec.id}')">Download CSV</button>
+          <button class="btn-delete" onclick="deleteRecording('${rec.id}')">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function skinLabel(v) {
+  return v === '1' ? 'Light' : v === '2' ? 'Medium' : v === '3' ? 'Dark' : v;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renameRecording(id) {
+  const list = loadRecordings();
+  const rec = list.find(r => r.id === id);
+  if (!rec) return;
+  const newLabel = prompt('Rename recording:', rec.label);
+  if (newLabel === null || newLabel.trim() === '') return;
+  rec.label = newLabel.trim();
+  saveRecordings(list);
+  renderRecordings();
+}
+
+function deleteRecording(id) {
+  if (!confirm('Delete this recording? This cannot be undone.')) return;
+  let list = loadRecordings();
+  list = list.filter(r => r.id !== id);
+  saveRecordings(list);
+  renderRecordings();
+}
+
+function setGlucose(id) {
+  const input = document.getElementById('glucose-input-' + id);
+  const val = input ? input.value : '';
+  if (!val) { alert('Enter the glucometer reading first.'); return; }
+  const list = loadRecordings();
+  const rec = list.find(r => r.id === id);
+  if (!rec) return;
+  rec.glucose = val;
+  saveRecordings(list);
+  renderRecordings();
+}
+
+function editGlucose(id) {
+  const list = loadRecordings();
+  const rec = list.find(r => r.id === id);
+  if (!rec) return;
+  const newVal = prompt('Update glucometer reading (mg/dL):', rec.glucose);
+  if (newVal === null || newVal.trim() === '') return;
+  rec.glucose = newVal.trim();
+  saveRecordings(list);
+  renderRecordings();
+}
+
+function downloadRecordingCSV(id) {
+  const list = loadRecordings();
+  const rec = list.find(r => r.id === id);
+  if (!rec) return;
+
+  let csv = 'sample_index,ir_value\n';
+  rec.samples.forEach((v, i) => { csv += i + ',' + v + '\n'; });
+  csv += '\n# metadata\n';
+  csv += 'label,' + rec.label + '\n';
+  csv += 'timestamp,' + new Date(rec.timestamp).toISOString() + '\n';
+  csv += 'age,' + rec.age + '\n';
+  csv += 'sex,' + rec.sex + '\n';
+  csv += 'bmi,' + rec.bmi + '\n';
+  csv += 'skin_color,' + skinLabel(rec.skincolor) + '\n';
+  csv += 'glucose_mgdl,' + (rec.glucose || '') + '\n';
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = rec.label.replace(/[^a-z0-9_\-]/gi, '_') + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 function selectSkin(el) {
   document.querySelectorAll('#skinSwatchRow .swatch').forEach(s => s.classList.remove('selected'));
@@ -152,6 +312,7 @@ function handleNotification(event) {
       if (!isNaN(val)) {
         ppgData.push(val);
         if (ppgData.length > MAX_PLOT_POINTS) ppgData.shift();
+        fullSessionData.push(val); // uncapped, kept for saving the full recording
       }
     }
     drawPlot();
@@ -165,6 +326,25 @@ function handleNotification(event) {
     document.getElementById('saveresult').textContent = text.substring(4);
     document.getElementById('saveresult').style.color = "#2563eb";
     document.getElementById('startBtn').disabled = false;
+
+    // Save the finished recording (full samples + the info entered at Start)
+    if (pendingSession) {
+      const list = loadRecordings();
+      list.push({
+        id: pendingSession.id,
+        label: 'Patient ' + pendingSession.datasetId,
+        timestamp: Date.now(),
+        age: pendingSession.age,
+        sex: pendingSession.sex,
+        bmi: pendingSession.bmi,
+        skincolor: pendingSession.skincolor,
+        glucose: null,
+        samples: fullSessionData
+      });
+      saveRecordings(list);
+      renderRecordings();
+      pendingSession = null;
+    }
   }
 }
 
@@ -242,6 +422,12 @@ function startRec() {
   currentDatasetId = parseInt(currentDatasetId);
 
   ppgData = [];
+  fullSessionData = [];
+  pendingSession = {
+    id: 'rec_' + Date.now(),
+    datasetId: currentDatasetId,
+    age, sex, bmi, skincolor
+  };
   drawPlot();
 
   const command = `START,${currentDatasetId},${age},${sex},${bmi},${skincolor}`;
@@ -252,6 +438,8 @@ function startRec() {
 
   localStorage.setItem('dataset_counter', currentDatasetId + 1);
 }
+
+renderRecordings();
 </script>
 </body>
 </html>
